@@ -6,7 +6,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -187,6 +189,65 @@ func testGobind(t *testing.T, exporter packagestest.Exporter) {
 				t.Error(err)
 			}
 		})
+	}
+}
+
+func TestGobindOverlay(t *testing.T) { packagestest.TestAll(t, testGobindOverlay) }
+func testGobindOverlay(t *testing.T, exporter packagestest.Exporter) {
+	mustHaveBindTestdata(t)
+
+	const pkgPath = "example.com/overlaytest"
+	suffix := fmt.Sprintf("%d", rand.Uint32())
+	oldAPI := "OldAPI" + suffix
+	newAPI := "NewAPI" + suffix
+	oldJavaAPI := "oldAPI" + suffix
+	newJavaAPI := "newAPI" + suffix
+	exported := packagestest.Export(t, exporter, []packagestest.Module{
+		{
+			Name: pkgPath,
+			Files: map[string]any{
+				"overlaytest.go": fmt.Sprintf("package overlaytest\n\nfunc %s() {}\n", oldAPI),
+			},
+		},
+		{
+			Name:  "golang.org/x/mobile",
+			Files: copyMobileTree(t, "../.."),
+		},
+	})
+	defer exported.Cleanup()
+
+	replacement := filepath.Join(t.TempDir(), "overlaytest.go")
+	if err := os.WriteFile(replacement, []byte(fmt.Sprintf("package overlaytest\n\nfunc %s() {}\n", newAPI)), 0644); err != nil {
+		t.Fatal(err)
+	}
+	overlayJSON, err := json.Marshal(struct {
+		Replace map[string]string
+	}{
+		Replace: map[string]string{exported.File(pkgPath, "overlaytest.go"): replacement},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	overlayFile := filepath.Join(t.TempDir(), "overlay.json")
+	if err := os.WriteFile(overlayFile, overlayJSON, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(gobindBin(t), "-lang=java", "-overlay="+overlayFile, pkgPath)
+	cmd.Dir = exported.Config.Dir
+	cmd.Env = exported.Config.Env
+	stderr := new(strings.Builder)
+	cmd.Stderr = stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("gobind failed: %v: %s", err, stderr)
+	}
+	// Java method names use lowerCamelCase, so NewAPI becomes newAPI.
+	if !bytes.Contains(out, []byte(newJavaAPI+"()")) {
+		t.Errorf("gobind output does not contain %s binding:\n%s", newAPI, out)
+	}
+	if bytes.Contains(out, []byte(oldJavaAPI+"()")) {
+		t.Errorf("gobind output unexpectedly contains %s binding:\n%s", oldAPI, out)
 	}
 }
 
